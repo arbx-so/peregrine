@@ -1,0 +1,53 @@
+{
+    "grpc": {
+        "endpoint": "https://solana-yellowstone-grpc.publicnode.com",
+        "api_token": null,
+        "use_tls": true,
+        "connection_timeout": "10s",
+        "request_timeout": "30s",
+        "retry_attempts": 3,
+        "retry_delay": "1s"
+    },
+    "rpc": {
+        "endpoint": "https://api.mainnet-beta.solana.com",
+        "connection_timeout": "10s",
+        "request_timeout": "10m",
+        "max_connections": 100,
+        "max_idle_per_host": 10,
+        "keep_alive_timeout": "60s"
+    },
+    "api": {
+        "bind_address": "127.0.0.1",
+        "port": 1945,
+        "max_connections": 128,
+        "request_timeout": "30s"
+    },
+    "performance": {
+        "worker_threads": 16,
+        "blocking_threads": 64,
+        "buffer_size": 65536,
+        "batch_size": 100,
+        "enable_compression": true
+    },
+    "programs": [
+        {
+            "program_id": "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+            "filters": [
+                {
+                    "memcmp": {
+                        "offset": 0,
+                        "bytes": [
+                            6
+                        ]
+                    }
+                },
+                {
+                    "memcmp": {
+                        "offset": 400,
+                        "bytes": "So11111111111111111111111111111111111111112"
+                    }
+                }
+            ]
+        }
+    ]
+}

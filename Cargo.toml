@@ -1,0 +1,59 @@
+[package]
+name = "peregrine"
+version = "0.1.0"
+edition = "2024"
+
+[profile.release]
+codegen-units = 1
+debug = false
+debug-assertions = false
+incremental = false
+lto = "fat"
+opt-level = 3
+overflow-checks = false
+panic = 'abort'
+strip = true
+
+[profile.dev]
+codegen-units = 256
+debug = true
+debug-assertions = true
+incremental = true
+lto = false
+opt-level = 2
+overflow-checks = true
+panic = "abort"
+
+[dependencies]
+ahash                               = "0.8.12"
+anyhow                              = "1"
+async-stream                        = "0.3.6"
+axum                                = { version = "0.8.4", features = ["macros"] }
+backoff                             = { version = "0.4", features = ["tokio"] }
+base64                              = "0.22.1"
+clap                                = { version = "4.5", features = ["derive"] }
+dashmap                             = "6.1.0"
+env_logger                          = "0.11.8"
+futures-util                        = "0.3.31"
+http-body-util                      = "0.1.3"
+humantime-serde                     = "1.1"
+itertools                           = "0.14.0"
+log                                 = "0.4"
+maplit                              = "1.0.2"
+rayon                               = "1.10.0"
+reqwest                             = { version = "0.12", features = ["json", "stream"] }
+serde                               = { version = "1", features = ["derive"] }
+serde_json                          = { version = "1", features = ["preserve_order"] }
+serde_with                          = { version = "3", features = ["base64"] }
+simd-json                           = "0.15.1"
+solana-account-decoder-client-types = "2"
+solana-client                       = "2"
+solana-rpc-client                   = "2"
+solana-rpc-client-api               = "2"
+solana-sdk                          = "2"
+thiserror                           = "2"
+tokio                               = { version = "1.47.1", features = ["rt-multi-thread", "full"] }
+tonic-health                        = "0.14.1"
+url                                 = { version = "2.5.7", features = ["serde"] }
+yellowstone-grpc-client             = "9.0.0"
+yellowstone-grpc-proto              = "9.0.0"
