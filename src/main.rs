@@ -86,7 +86,7 @@ impl ConnectionPool {
                 headers
             })
             .timeout(config.rpc.request_timeout)
-            .pool_idle_timeout(config.api.keep_alive_timeout)
+            .pool_idle_timeout(config.rpc.keep_alive_timeout)
             .pool_max_idle_per_host(config.rpc.max_idle_per_host)
             .build()
             .map_err(|e| PeregrineError::Config(format!("Failed to build HTTP client: {e}")))?;
