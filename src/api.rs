@@ -18,7 +18,7 @@ use futures_util::{Stream, TryStreamExt};
 use http_body_util::StreamBody;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use reqwest::Client;
-use serde_json::from_value;
+use serde_json::{Value, from_value, json};
 use solana_sdk::pubkey::Pubkey;
 
 use solana_rpc_client_api::filter::MemcmpEncodedBytes;
@@ -35,8 +35,34 @@ use crate::{
 
 const INITIAL_BUFFER_CAPACITY: usize = 256; // Reserve 256 bytes per account
 
-type ApiResult<T> = Result<T, (StatusCode, String)>;
+type ApiResult<T> = Result<T, Box<Response<Body>>>;
 type StreamedBytes = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
+
+/// Build a JSON-RPC 2.0 error response
+fn build_error_response(
+    id: Option<&Value>,
+    code: u16,
+    message: &str,
+    data: Option<String>,
+) -> Box<Response<Body>> {
+    let error_body = json!({
+        "jsonrpc": "2.0",
+        "error": {
+            "code": code,
+            "message": message,
+            "data": data,
+        },
+        "id": id.cloned().unwrap_or(Value::Null),
+    });
+
+    Box::new(
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(error_body.to_string()))
+            .expect("Failed to build error response"),
+    )
+}
 
 /// Start the API server
 pub async fn listen() {
@@ -74,22 +100,25 @@ async fn create_listener(config: &crate::config::Config) -> tokio::net::TcpListe
 }
 
 /// Handle incoming RPC requests
-async fn handler(
-    State(state): State<Arc<AppState>>,
-    raw_body: Bytes,
-) -> ApiResult<impl IntoResponse> {
+async fn handler(State(state): State<Arc<AppState>>, raw_body: Bytes) -> impl IntoResponse {
     log::debug!("Received {} bytes", raw_body.len());
 
-    let request = parse_rpc_request(&raw_body)?;
+    let request = match parse_rpc_request(&raw_body) {
+        Ok(req) => req,
+        Err(err_response) => return *err_response,
+    };
+
     log::info!("Processing {} (id: {})", request.method, request.id);
 
     match request.method {
-        RpcRequestType::GetProgramAccounts => {
-            handle_get_program_accounts(state, request, raw_body).await
-        }
+        RpcRequestType::GetProgramAccounts => handle_get_program_accounts(state, request, raw_body)
+            .await
+            .unwrap_or_else(|err| *err),
         _ => {
             log::debug!("Forwarding {:?} to upstream", request.method);
-            forward_to_upstream(state, raw_body).await
+            forward_to_upstream(state, raw_body, Some(&request.id))
+                .await
+                .unwrap_or_else(|err| *err)
         }
     }
 }
@@ -97,7 +126,12 @@ async fn handler(
 fn parse_rpc_request(raw_body: &Bytes) -> ApiResult<RpcRequest> {
     serde_json::from_slice::<RpcRequest>(raw_body).map_err(|e| {
         log::error!("Failed to parse RPC request: {e}");
-        (StatusCode::BAD_REQUEST, format!("Invalid JSON-RPC: {e}"))
+        build_error_response(
+            None,
+            StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            "Parse error",
+            Some(e.to_string()),
+        )
     })
 }
 
@@ -120,7 +154,7 @@ async fn handle_get_program_accounts(
             Ok(cached)
         } else {
             log::info!("Cache miss for {} (hash: {})", params.0, cache_key);
-            forward_to_upstream(state, raw_body).await
+            forward_to_upstream(state, raw_body, Some(&request.id)).await
         }
     }
 }
@@ -128,7 +162,12 @@ async fn handle_get_program_accounts(
 fn parse_gpa_params(request: &RpcRequest) -> ApiResult<GetProgramAccountsParams> {
     from_value(request.params.clone()).map_err(|e| {
         log::error!("Invalid GetProgramAccounts params: {e}");
-        (StatusCode::BAD_REQUEST, format!("Invalid params: {e}"))
+        build_error_response(
+            Some(&request.id),
+            StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            "Invalid params",
+            Some(e.to_string()),
+        )
     })
 }
 
@@ -347,10 +386,14 @@ fn create_response_stream(prefix: String, chunks: Vec<Bytes>, suffix: String) ->
     })
 }
 
-async fn forward_to_upstream(state: Arc<AppState>, raw_body: Bytes) -> ApiResult<Response<Body>> {
+async fn forward_to_upstream(
+    state: Arc<AppState>,
+    raw_body: Bytes,
+    request_id: Option<&Value>,
+) -> ApiResult<Response<Body>> {
     log::debug!("Forwarding to {}", state.rpc_url);
 
-    let upstream_response = send_upstream_request(&state, raw_body).await?;
+    let upstream_response = send_upstream_request(&state, raw_body, request_id).await?;
 
     let status = upstream_response.status();
     if !status.is_success() {
@@ -364,7 +407,11 @@ async fn forward_to_upstream(state: Arc<AppState>, raw_body: Bytes) -> ApiResult
     Ok(build_proxy_response(upstream_response))
 }
 
-async fn send_upstream_request(state: &AppState, body: Bytes) -> ApiResult<reqwest::Response> {
+async fn send_upstream_request(
+    state: &AppState,
+    body: Bytes,
+    request_id: Option<&Value>,
+) -> ApiResult<reqwest::Response> {
     state
         .client
         .post(&state.rpc_url)
@@ -373,19 +420,12 @@ async fn send_upstream_request(state: &AppState, body: Bytes) -> ApiResult<reqwe
         .send()
         .await
         .map_err(|e| {
-            let status = e.status().unwrap_or(StatusCode::BAD_GATEWAY);
             log::error!("Upstream request failed: {e}");
-            (
-                status,
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "error": {
-                        "code": status.as_u16(),
-                        "message": e.to_string()
-                    },
-                    "id": 1
-                })
-                .to_string(),
+            build_error_response(
+                request_id,
+                e.status().unwrap_or_default().as_u16(),
+                "Server error",
+                Some(format!("Upstream request failed: {e}")),
             )
         })
 }
