@@ -1,5 +1,6 @@
 {
     "grpc": {
+        "enabled": true,
         "endpoint": "https://solana-yellowstone-grpc.publicnode.com",
         "api_token": null,
         "use_tls": true,
@@ -42,9 +43,9 @@
                     }
                 },
                 {
-                    "memcmp": {
+                    "dynamic": {
                         "offset": 400,
-                        "bytes": "So11111111111111111111111111111111111111112"
+                        "length": 32
                     }
                 }
             ]

@@ -401,34 +401,57 @@ async fn run_application(config: Arc<Config>) -> PeregrineResult<()> {
         }
     }
 
-    let yellowstone_handle = tokio::spawn(yellowstone_listener(pool.clone()));
+    let yellowstone_handle = if config.grpc.enabled {
+        Some(tokio::spawn(yellowstone_listener(pool.clone())))
+    } else {
+        info!("Yellowstone listener disabled (grpc.enabled = false)");
+        None
+    };
+    
     let api_handle = tokio::spawn(api::listen());
 
-    tokio::select! {
-        result = yellowstone_handle => {
-            match result {
-                Ok(Ok(())) => info!("Yellowstone listener exited normally"),
-                Ok(Err(e)) => {
-                    error!("Yellowstone listener failed: {e}");
-                    return Err(e);
-                }
-                Err(e) => {
-                    error!("Yellowstone listener task panicked: {e}");
-                    return Err(PeregrineError::Task(format!("Yellowstone listener panicked: {e}")));
-                }
-            }
-        }
-        result = api_handle => {
-            match result {
-                Ok(()) => info!("API server exited normally"),
-                Err(e) => {
-                    error!("API server task panicked: {e}");
-                    return Err(PeregrineError::Task(format!("API server panicked: {e}")));
+    if let Some(yellowstone_handle) = yellowstone_handle {
+        tokio::select! {
+            result = yellowstone_handle => {
+                match result {
+                    Ok(Ok(())) => info!("Yellowstone listener exited normally"),
+                    Ok(Err(e)) => {
+                        error!("Yellowstone listener failed: {e}");
+                        return Err(e);
+                    }
+                    Err(e) => {
+                        error!("Yellowstone listener task panicked: {e}");
+                        return Err(PeregrineError::Task(format!("Yellowstone listener panicked: {e}")));
+                    }
                 }
             }
+            result = api_handle => {
+                match result {
+                    Ok(()) => info!("API server exited normally"),
+                    Err(e) => {
+                        error!("API server task panicked: {e}");
+                        return Err(PeregrineError::Task(format!("API server panicked: {e}")));
+                    }
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received shutdown signal");
+            }
         }
-        _ = tokio::signal::ctrl_c() => {
-            info!("Received shutdown signal");
+    } else {
+        tokio::select! {
+            result = api_handle => {
+                match result {
+                    Ok(()) => info!("API server exited normally"),
+                    Err(e) => {
+                        error!("API server task panicked: {e}");
+                        return Err(PeregrineError::Task(format!("API server panicked: {e}")));
+                    }
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received shutdown signal");
+            }
         }
     }
 
@@ -437,7 +460,7 @@ async fn run_application(config: Arc<Config>) -> PeregrineResult<()> {
 }
 
 /// Compute a unique hash for a program based on its ID and filters
-/// Excludes Unknown filters since they're used for dynamic filtering
+/// Excludes Dynamic filters since they're used for runtime filtering
 fn compute_program_hash(program: &ProgramConfig) -> u64 {
     let mut hasher = AHasher::default();
     program.program_id.hash(&mut hasher);
@@ -445,8 +468,8 @@ fn compute_program_hash(program: &ProgramConfig) -> u64 {
     if let Some(filters) = &program.filters {
         let mut combined_hash: u64 = 0;
         for filter in filters {
-            // Skip Unknown filters in hash computation
-            if !matches!(filter, ProgramAccountFilter::Unknown(_)) {
+            // Skip Dynamic filters in hash computation
+            if !matches!(filter, ProgramAccountFilter::Dynamic(_)) {
                 let mut filter_hasher = AHasher::default();
                 filter.normalized_hash(&mut filter_hasher);
                 combined_hash ^= filter_hasher.finish();
@@ -489,7 +512,7 @@ pub async fn populate_in_memory_map(
                                                 ),
                                             ))
                                         }
-                                        ProgramAccountFilter::Unknown(_) => None,
+                                        ProgramAccountFilter::Dynamic(_) => None,
                                     })
                                     .collect()
                             }),
@@ -559,7 +582,7 @@ async fn yellowstone_listener(pool: Arc<ConnectionPool>) -> PeregrineResult<()> 
                                     )),
                                 })
                             }
-                            ProgramAccountFilter::Unknown(_) => None,
+                            ProgramAccountFilter::Dynamic(_) => None,
                         })
                         .collect()
                 }),

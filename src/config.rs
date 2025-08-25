@@ -17,6 +17,8 @@ pub struct Config {
 /// gRPC configuration settings
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GrpcConfig {
+    #[serde(default = "defaults::true_value")]
+    pub enabled: bool,
     #[serde(default = "defaults::grpc_endpoint")]
     pub endpoint: url::Url,
     pub api_token: Option<String>,
@@ -103,9 +105,9 @@ impl Memcmp {
     }
 }
 
-/// Unknown bytes filter for dynamic filtering
+/// Dynamic bytes filter for runtime filtering
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
-pub struct UnknownFilter {
+pub struct DynamicFilter {
     pub offset: usize,
     pub length: usize,
 }
@@ -116,7 +118,7 @@ pub struct UnknownFilter {
 pub enum ProgramAccountFilter {
     DataSize(u64),
     Memcmp(Memcmp),
-    Unknown(UnknownFilter),
+    Dynamic(DynamicFilter),
 }
 
 impl ProgramAccountFilter {
@@ -132,10 +134,10 @@ impl ProgramAccountFilter {
                 memcmp.offset.hash(state);
                 memcmp.bytes_as_vec().hash(state);
             }
-            ProgramAccountFilter::Unknown(unknown) => {
+            ProgramAccountFilter::Dynamic(dynamic) => {
                 2u8.hash(state);
-                unknown.offset.hash(state);
-                unknown.length.hash(state);
+                dynamic.offset.hash(state);
+                dynamic.length.hash(state);
             }
         }
     }

@@ -12,6 +12,7 @@ Peregrine is a blazing-fast caching layer for Solana program accounts that sits 
 - **High-Performance Caching**: In-memory cache using DashMap with AHash for optimal performance
 - **Parallel Processing**: Utilizes Rayon for parallel serialization and processing
 - **Configurable Filters**: Support for all Solana RPC filters on program accounts
+- **Dynamic Filtering**: Runtime filtering on cached data for flexible queries without re-fetching
 - **Streaming Responses**: Efficient streaming JSON responses for large datasets
 - **Automatic Retry Logic**: Built-in exponential backoff for network resilience
 

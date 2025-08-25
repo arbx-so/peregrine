@@ -26,7 +26,7 @@ use solana_sdk::bs58;
 
 use crate::{
     GPA_MAP, PROGRAM_CONFIG,
-    config::{ProgramAccountFilter, UnknownFilter},
+    config::{DynamicFilter, ProgramAccountFilter},
     structs::{
         AppState, GetProgramAccountsParams, GetProgramAccountsResult, HashableAccount, RpcRequest,
         RpcRequestType,
@@ -108,7 +108,7 @@ async fn handle_get_program_accounts(
 ) -> ApiResult<Response<Body>> {
     let params = parse_gpa_params(&request)?;
 
-    // Check if we need to apply dynamic filtering for unknown bytes
+    // Check if we need to apply dynamic filtering
     if let Some(cached) = get_cached_response_with_filtering(&params, &request).await {
         log::info!("Cache hit for {} with dynamic filtering", params.0);
         Ok(cached)
@@ -165,30 +165,30 @@ async fn get_cached_response_with_filtering(
     // Find the program configuration that matches this request
     let program_config = config.programs.iter().find(|p| p.program_id == params.0)?;
 
-    // Check if this program has unknown filters configured
-    let unknown_filters: Vec<&UnknownFilter> = program_config
+    // Check if this program has dynamic filters configured
+    let dynamic_filters_config: Vec<&DynamicFilter> = program_config
         .filters
         .as_ref()?
         .iter()
         .filter_map(|f| match f {
-            ProgramAccountFilter::Unknown(u) => Some(u),
+            ProgramAccountFilter::Dynamic(d) => Some(d),
             _ => None,
         })
         .collect();
 
-    if unknown_filters.is_empty() {
+    if dynamic_filters_config.is_empty() {
         return None;
     }
 
-    // Check if the request contains memcmp filters that match unknown filter positions
+    // Check if the request contains memcmp filters that match dynamic filter positions
     let request_filters = params.1.filters.as_ref()?;
     let mut dynamic_filters = Vec::new();
 
     for filter in request_filters {
         if let ProgramAccountFilter::Memcmp(memcmp) = filter {
-            // Check if this memcmp matches any unknown filter position
-            for unknown in &unknown_filters {
-                if memcmp.offset == unknown.offset {
+            // Check if this memcmp matches any dynamic filter position
+            for dynamic_cfg in &dynamic_filters_config {
+                if memcmp.offset == dynamic_cfg.offset {
                     let bytes = match &memcmp.bytes {
                         MemcmpEncodedBytes::Base58(s) => {
                             bs58::decode(s).into_vec().unwrap_or_default()
@@ -199,8 +199,8 @@ async fn get_cached_response_with_filtering(
                         }
                         MemcmpEncodedBytes::Bytes(b) => b.clone(),
                     };
-                    if bytes.len() == unknown.length {
-                        dynamic_filters.push((unknown.offset, bytes));
+                    if bytes.len() == dynamic_cfg.length {
+                        dynamic_filters.push((dynamic_cfg.offset, bytes));
                     }
                 }
             }
@@ -216,8 +216,11 @@ async fn get_cached_response_with_filtering(
     for filter in request_filters {
         match filter {
             ProgramAccountFilter::Memcmp(memcmp) => {
-                // Skip memcmp filters that match unknown positions
-                if !unknown_filters.iter().any(|u| u.offset == memcmp.offset) {
+                // Skip memcmp filters that match dynamic positions
+                if !dynamic_filters_config
+                    .iter()
+                    .any(|d| d.offset == memcmp.offset)
+                {
                     base_filters.push(filter.clone());
                 }
             }
@@ -271,10 +274,7 @@ async fn get_cached_response_with_filtering(
 
     drop(record);
 
-    if filtered_entries.is_empty() {
-        return None;
-    }
-
+    // Always return a response, even if empty (to avoid fallback to upstream)
     Some(build_streamed_response(filtered_entries, request).await)
 }
 
