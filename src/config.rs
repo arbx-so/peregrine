@@ -103,12 +103,20 @@ impl Memcmp {
     }
 }
 
+/// Unknown bytes filter for dynamic filtering
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub struct UnknownFilter {
+    pub offset: usize,
+    pub length: usize,
+}
+
 /// Filter types for program accounts
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProgramAccountFilter {
     DataSize(u64),
     Memcmp(Memcmp),
+    Unknown(UnknownFilter),
 }
 
 impl ProgramAccountFilter {
@@ -123,6 +131,11 @@ impl ProgramAccountFilter {
                 1u8.hash(state);
                 memcmp.offset.hash(state);
                 memcmp.bytes_as_vec().hash(state);
+            }
+            ProgramAccountFilter::Unknown(unknown) => {
+                2u8.hash(state);
+                unknown.offset.hash(state);
+                unknown.length.hash(state);
             }
         }
     }

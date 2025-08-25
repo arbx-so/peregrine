@@ -10,14 +10,9 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_with::{DisplayFromStr, serde_as};
-use solana_client::rpc_filter::RpcFilterType;
 use solana_rpc_client_api::filter::MemcmpEncodedBytes;
-use solana_sdk::{account::Account, bs58, pubkey::Pubkey};
-use yellowstone_grpc_proto::geyser::{
-    SubscribeRequestFilterAccountsFilter, SubscribeRequestFilterAccountsFilterMemcmp,
-    SubscribeUpdateAccountInfo, subscribe_request_filter_accounts_filter::Filter,
-    subscribe_request_filter_accounts_filter_memcmp::Data,
-};
+use solana_sdk::{account::Account, pubkey::Pubkey};
+use yellowstone_grpc_proto::geyser::SubscribeUpdateAccountInfo;
 
 /// Represents a Solana account in a hashable format for caching
 #[serde_as]
@@ -95,79 +90,7 @@ pub struct Memcmp {
     pub bytes: MemcmpEncodedBytes,
 }
 
-impl Memcmp {
-    pub fn bytes_as_vec(&self) -> Vec<u8> {
-        match &self.bytes {
-            MemcmpEncodedBytes::Base58(s) => bs58::decode(s).into_vec().unwrap_or_default(),
-            MemcmpEncodedBytes::Base64(s) => {
-                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
-                    .unwrap_or_default()
-            }
-            MemcmpEncodedBytes::Bytes(b) => b.clone(),
-        }
-    }
-}
 
-/// Filter for program accounts
-#[derive(Clone, Debug, Hash, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ProgramAccountFilter {
-    /// Filter by account data size
-    DataSize(u64),
-    /// Filter by memory comparison
-    Memcmp(Memcmp),
-}
-
-impl ProgramAccountFilter {
-    pub fn normalized_hash<H: Hasher>(&self, state: &mut H) {
-        match self {
-            ProgramAccountFilter::DataSize(size) => {
-                0u8.hash(state);
-                size.hash(state);
-            }
-            ProgramAccountFilter::Memcmp(memcmp) => {
-                1u8.hash(state);
-                memcmp.offset.hash(state);
-                memcmp.bytes_as_vec().hash(state);
-            }
-        }
-    }
-}
-
-impl From<ProgramAccountFilter> for RpcFilterType {
-    fn from(value: ProgramAccountFilter) -> Self {
-        match value {
-            ProgramAccountFilter::DataSize(n) => Self::DataSize(n),
-            ProgramAccountFilter::Memcmp(n) => {
-                Self::Memcmp(solana_client::rpc_filter::Memcmp::new(n.offset, n.bytes))
-            }
-        }
-    }
-}
-
-impl From<ProgramAccountFilter> for SubscribeRequestFilterAccountsFilter {
-    fn from(value: ProgramAccountFilter) -> Self {
-        let filter = match value {
-            ProgramAccountFilter::DataSize(n) => Filter::Datasize(n),
-            ProgramAccountFilter::Memcmp(n) => {
-                Filter::Memcmp(SubscribeRequestFilterAccountsFilterMemcmp {
-                    data: Some({
-                        match n.bytes {
-                            MemcmpEncodedBytes::Base58(n) => Data::Base58(n),
-                            MemcmpEncodedBytes::Base64(n) => Data::Base64(n),
-                            MemcmpEncodedBytes::Bytes(n) => Data::Bytes(n),
-                        }
-                    }),
-                    offset: n.offset as u64,
-                })
-            }
-        };
-
-        Self {
-            filter: Some(filter),
-        }
-    }
-}
 
 /// Parameters for `GetProgramAccounts` RPC method
 #[derive(Deserialize, Debug)]
@@ -177,7 +100,7 @@ pub struct GetProgramAccountsParams(pub String, pub GetProgramAccountsConfig);
 #[derive(Deserialize, Debug)]
 pub struct GetProgramAccountsConfig {
     /// Optional filters to apply to the accounts
-    pub filters: Option<Vec<ProgramAccountFilter>>,
+    pub filters: Option<Vec<crate::config::ProgramAccountFilter>>,
 }
 
 /// JSON-RPC request structure

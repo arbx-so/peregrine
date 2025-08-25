@@ -371,8 +371,8 @@ async fn run_application(config: Arc<Config>) -> PeregrineResult<()> {
         });
 
         info!(
-            "Spawning task for program {} (hash 0x{:x})",
-            program.program_id, hash
+            "Spawning task for program {} (hash {hash:x})",
+            program.program_id
         );
 
         let pool_clone = pool.clone();
@@ -389,7 +389,7 @@ async fn run_application(config: Arc<Config>) -> PeregrineResult<()> {
                     );
                 }
                 Err(err) => {
-                    error!("populate_in_memory_map(0x{hash:x}) failed: {err}");
+                    error!("populate_in_memory_map({hash:x}) failed: {err}");
                 }
             }
         }));
@@ -437,6 +437,7 @@ async fn run_application(config: Arc<Config>) -> PeregrineResult<()> {
 }
 
 /// Compute a unique hash for a program based on its ID and filters
+/// Excludes Unknown filters since they're used for dynamic filtering
 fn compute_program_hash(program: &ProgramConfig) -> u64 {
     let mut hasher = AHasher::default();
     program.program_id.hash(&mut hasher);
@@ -444,9 +445,12 @@ fn compute_program_hash(program: &ProgramConfig) -> u64 {
     if let Some(filters) = &program.filters {
         let mut combined_hash: u64 = 0;
         for filter in filters {
-            let mut filter_hasher = AHasher::default();
-            filter.normalized_hash(&mut filter_hasher);
-            combined_hash ^= filter_hasher.finish();
+            // Skip Unknown filters in hash computation
+            if !matches!(filter, ProgramAccountFilter::Unknown(_)) {
+                let mut filter_hasher = AHasher::default();
+                filter.normalized_hash(&mut filter_hasher);
+                combined_hash ^= filter_hasher.finish();
+            }
         }
         combined_hash.hash(&mut hasher);
     }
@@ -473,18 +477,19 @@ pub async fn populate_in_memory_map(
                         RpcProgramAccountsConfig {
                             filters: filters.as_ref().map(|f| {
                                 f.iter()
-                                    .map(|filter| match filter {
-                                        ProgramAccountFilter::DataSize(n) => {
-                                            solana_client::rpc_filter::RpcFilterType::DataSize(*n)
-                                        }
+                                    .filter_map(|filter| match filter {
+                                        ProgramAccountFilter::DataSize(n) => Some(
+                                            solana_client::rpc_filter::RpcFilterType::DataSize(*n),
+                                        ),
                                         ProgramAccountFilter::Memcmp(m) => {
-                                            solana_client::rpc_filter::RpcFilterType::Memcmp(
+                                            Some(solana_client::rpc_filter::RpcFilterType::Memcmp(
                                                 solana_client::rpc_filter::Memcmp::new(
                                                     m.offset,
                                                     m.bytes.clone(),
                                                 ),
-                                            )
+                                            ))
                                         }
+                                        ProgramAccountFilter::Unknown(_) => None,
                                     })
                                     .collect()
                             }),
@@ -528,14 +533,14 @@ async fn yellowstone_listener(pool: Arc<ConnectionPool>) -> PeregrineResult<()> 
                 filters: program.filters.as_ref().map_or(Vec::new(), |filters| {
                     filters
                         .iter()
-                        .map(|f| match f {
+                        .filter_map(|f| match f {
                             ProgramAccountFilter::DataSize(n) => {
-                                SubscribeRequestFilterAccountsFilter {
+                                Some(SubscribeRequestFilterAccountsFilter {
                                     filter: Some(Filter::Datasize(*n)),
-                                }
+                                })
                             }
                             ProgramAccountFilter::Memcmp(m) => {
-                                SubscribeRequestFilterAccountsFilter {
+                                Some(SubscribeRequestFilterAccountsFilter {
                                     filter: Some(Filter::Memcmp(
                                         SubscribeRequestFilterAccountsFilterMemcmp {
                                             offset: m.offset as u64,
@@ -552,8 +557,9 @@ async fn yellowstone_listener(pool: Arc<ConnectionPool>) -> PeregrineResult<()> 
                                             }),
                                         },
                                     )),
-                                }
+                                })
                             }
+                            ProgramAccountFilter::Unknown(_) => None,
                         })
                         .collect()
                 }),

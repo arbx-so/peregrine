@@ -21,8 +21,12 @@ use reqwest::Client;
 use serde_json::from_value;
 use solana_sdk::pubkey::Pubkey;
 
+use solana_rpc_client_api::filter::MemcmpEncodedBytes;
+use solana_sdk::bs58;
+
 use crate::{
     GPA_MAP, PROGRAM_CONFIG,
+    config::{ProgramAccountFilter, UnknownFilter},
     structs::{
         AppState, GetProgramAccountsParams, GetProgramAccountsResult, HashableAccount, RpcRequest,
         RpcRequestType,
@@ -103,14 +107,21 @@ async fn handle_get_program_accounts(
     raw_body: Bytes,
 ) -> ApiResult<Response<Body>> {
     let params = parse_gpa_params(&request)?;
-    let cache_key = compute_cache_key(&params);
 
-    if let Some(cached) = get_cached_response(&cache_key, &request).await {
-        log::info!("Cache hit for {} (hash: {})", params.0, cache_key);
+    // Check if we need to apply dynamic filtering for unknown bytes
+    if let Some(cached) = get_cached_response_with_filtering(&params, &request).await {
+        log::info!("Cache hit for {} with dynamic filtering", params.0);
         Ok(cached)
     } else {
-        log::info!("Cache miss for {} (hash: {})", params.0, cache_key);
-        forward_to_upstream(state, raw_body).await
+        log::debug!("Dynamic filtering not applicable or no match found");
+        let cache_key = compute_cache_key(&params);
+        if let Some(cached) = get_cached_response(&cache_key, &request).await {
+            log::info!("Cache hit for {} (hash: {})", params.0, cache_key);
+            Ok(cached)
+        } else {
+            log::info!("Cache miss for {} (hash: {})", params.0, cache_key);
+            forward_to_upstream(state, raw_body).await
+        }
     }
 }
 
@@ -121,11 +132,11 @@ fn parse_gpa_params(request: &RpcRequest) -> ApiResult<GetProgramAccountsParams>
     })
 }
 
-fn compute_cache_key(params: &GetProgramAccountsParams) -> u64 {
+fn compute_cache_key_with_filters(program_id: &str, filters: &[ProgramAccountFilter]) -> u64 {
     let mut hasher = AHasher::default();
-    params.0.hash(&mut hasher);
+    program_id.hash(&mut hasher);
 
-    if let Some(filters) = &params.1.filters {
+    if !filters.is_empty() {
         let combined_hash = filters
             .iter()
             .map(|filter| {
@@ -139,6 +150,132 @@ fn compute_cache_key(params: &GetProgramAccountsParams) -> u64 {
     }
 
     hasher.finish()
+}
+
+fn compute_cache_key(params: &GetProgramAccountsParams) -> u64 {
+    compute_cache_key_with_filters(&params.0, params.1.filters.as_deref().unwrap_or(&[]))
+}
+
+async fn get_cached_response_with_filtering(
+    params: &GetProgramAccountsParams,
+    request: &RpcRequest,
+) -> Option<Response<Body>> {
+    let config = PROGRAM_CONFIG.get()?;
+
+    // Find the program configuration that matches this request
+    let program_config = config.programs.iter().find(|p| p.program_id == params.0)?;
+
+    // Check if this program has unknown filters configured
+    let unknown_filters: Vec<&UnknownFilter> = program_config
+        .filters
+        .as_ref()?
+        .iter()
+        .filter_map(|f| match f {
+            ProgramAccountFilter::Unknown(u) => Some(u),
+            _ => None,
+        })
+        .collect();
+
+    if unknown_filters.is_empty() {
+        return None;
+    }
+
+    // Check if the request contains memcmp filters that match unknown filter positions
+    let request_filters = params.1.filters.as_ref()?;
+    let mut dynamic_filters = Vec::new();
+
+    for filter in request_filters {
+        if let ProgramAccountFilter::Memcmp(memcmp) = filter {
+            // Check if this memcmp matches any unknown filter position
+            for unknown in &unknown_filters {
+                if memcmp.offset == unknown.offset {
+                    let bytes = match &memcmp.bytes {
+                        MemcmpEncodedBytes::Base58(s) => {
+                            bs58::decode(s).into_vec().unwrap_or_default()
+                        }
+                        MemcmpEncodedBytes::Base64(s) => {
+                            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
+                                .unwrap_or_default()
+                        }
+                        MemcmpEncodedBytes::Bytes(b) => b.clone(),
+                    };
+                    if bytes.len() == unknown.length {
+                        dynamic_filters.push((unknown.offset, bytes));
+                    }
+                }
+            }
+        }
+    }
+
+    if dynamic_filters.is_empty() {
+        return None;
+    }
+
+    // Compute the cache key without the dynamic filters
+    let mut base_filters = Vec::new();
+    for filter in request_filters {
+        match filter {
+            ProgramAccountFilter::Memcmp(memcmp) => {
+                // Skip memcmp filters that match unknown positions
+                if !unknown_filters.iter().any(|u| u.offset == memcmp.offset) {
+                    base_filters.push(filter.clone());
+                }
+            }
+            _ => base_filters.push(filter.clone()),
+        }
+    }
+
+    let base_key = compute_cache_key_with_filters(&params.0, &base_filters);
+    log::debug!(
+        "Looking for cache with base key: {} ({:x}) for program {}",
+        base_key,
+        base_key,
+        params.0
+    );
+    log::debug!(
+        "Available cache keys: {:?}",
+        GPA_MAP.iter().map(|e| e.key().clone()).collect::<Vec<_>>()
+    );
+    let record = GPA_MAP.get(&base_key.to_string())?;
+
+    // Apply dynamic filtering to the cached entries
+    let filtered_entries: Vec<(Pubkey, Arc<HashableAccount>)> = record
+        .value()
+        .iter()
+        .filter_map(|x| {
+            let pair = x.pair();
+            let account = pair.1.clone();
+
+            // Decode the account data
+            let account_data = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                &account.data[0],
+            )
+            .ok()?;
+
+            // Check all dynamic filters
+            for (offset, expected_bytes) in &dynamic_filters {
+                if account_data.len() < offset + expected_bytes.len() {
+                    return None;
+                }
+
+                let actual_bytes = &account_data[*offset..*offset + expected_bytes.len()];
+                if actual_bytes != expected_bytes.as_slice() {
+                    return None;
+                }
+            }
+
+            Some((*pair.0, account))
+        })
+        .collect();
+
+    drop(record);
+
+    if filtered_entries.is_empty() {
+        return None;
+    }
+
+    Some(build_streamed_response(filtered_entries, request).await)
 }
 
 async fn get_cached_response(cache_key: &u64, request: &RpcRequest) -> Option<Response<Body>> {
@@ -236,10 +373,19 @@ async fn send_upstream_request(state: &AppState, body: Bytes) -> ApiResult<reqwe
         .send()
         .await
         .map_err(|e| {
+            let status = e.status().unwrap_or(StatusCode::BAD_GATEWAY);
             log::error!("Upstream request failed: {e}");
             (
-                e.status().unwrap_or(StatusCode::BAD_GATEWAY),
-                format!("Upstream error: {e}"),
+                status,
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "error": {
+                        "code": status.as_u16(),
+                        "message": e.to_string()
+                    },
+                    "id": 1
+                })
+                .to_string(),
             )
         })
 }
@@ -251,7 +397,7 @@ fn build_proxy_response(upstream: reqwest::Response) -> Response<Body> {
     let byte_stream = upstream.bytes_stream().map_err(std::io::Error::other);
     let body = Body::from_stream(StreamBody::new(byte_stream));
 
-    let mut builder = Response::builder().status(status.as_u16());
+    let mut builder = Response::builder().status(status);
     for (name, value) in headers {
         if let Some(name) = name {
             builder = builder.header(name.as_str(), value.as_bytes());
