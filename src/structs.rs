@@ -5,6 +5,7 @@ use std::{
 };
 
 use base64::Engine;
+use bloomfilter::Bloom;
 use dashmap::DashMap;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -79,6 +80,9 @@ impl From<Account> for HashableAccount {
 /// Value: `DashMap` of account public keys to account data
 pub type ProgramAccountMap =
     DashMap<String, DashMap<Pubkey, Arc<HashableAccount>, ahash::RandomState>, ahash::RandomState>;
+
+/// Bloom filter cache for dynamic filter lookups
+pub type BloomFilterCache = DashMap<String, Arc<Bloom<Vec<u8>>>, ahash::RandomState>;
 
 /// Memory comparison filter for account data
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
