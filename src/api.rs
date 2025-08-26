@@ -1,10 +1,3 @@
-use std::{
-    hash::{Hash, Hasher},
-    pin::Pin,
-    sync::Arc,
-};
-
-use ahash::AHasher;
 use async_stream::try_stream;
 use axum::{
     Router,
@@ -20,20 +13,20 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 use reqwest::Client;
 use serde_json::{Value, from_value, json};
 use solana_sdk::pubkey::Pubkey;
-
-use solana_rpc_client_api::filter::MemcmpEncodedBytes;
-use solana_sdk::bs58;
+use std::{
+    hash::{Hash, Hasher},
+    pin::Pin,
+    sync::Arc,
+};
 
 use crate::{
-    GPA_MAP, PROGRAM_CONFIG,
+    BLOOM_CACHE, GPA_MAP, PROGRAM_CONFIG,
     config::{DynamicFilter, ProgramAccountFilter},
     structs::{
         AppState, GetProgramAccountsParams, GetProgramAccountsResult, HashableAccount, RpcRequest,
         RpcRequestType,
     },
 };
-
-const INITIAL_BUFFER_CAPACITY: usize = 256; // Reserve 256 bytes per account
 
 type ApiResult<T> = Result<T, Box<Response<Body>>>;
 type StreamedBytes = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
@@ -172,14 +165,14 @@ fn parse_gpa_params(request: &RpcRequest) -> ApiResult<GetProgramAccountsParams>
 }
 
 fn compute_cache_key_with_filters(program_id: &str, filters: &[ProgramAccountFilter]) -> u64 {
-    let mut hasher = AHasher::default();
+    let mut hasher = ahash::AHasher::default();
     program_id.hash(&mut hasher);
 
     if !filters.is_empty() {
         let combined_hash = filters
             .iter()
             .map(|filter| {
-                let mut filter_hasher = AHasher::default();
+                let mut filter_hasher = ahash::AHasher::default();
                 filter.normalized_hash(&mut filter_hasher);
                 filter_hasher.finish()
             })
@@ -204,7 +197,6 @@ async fn get_cached_response_with_filtering(
     // Find the program configuration that matches this request
     let program_config = config.programs.iter().find(|p| p.program_id == params.0)?;
 
-    // Check if this program has dynamic filters configured
     let dynamic_filters_config: Vec<&DynamicFilter> = program_config
         .filters
         .as_ref()?
@@ -219,25 +211,14 @@ async fn get_cached_response_with_filtering(
         return None;
     }
 
-    // Check if the request contains memcmp filters that match dynamic filter positions
     let request_filters = params.1.filters.as_ref()?;
-    let mut dynamic_filters = Vec::new();
+    let mut dynamic_filters = Vec::with_capacity(dynamic_filters_config.len());
 
     for filter in request_filters {
         if let ProgramAccountFilter::Memcmp(memcmp) = filter {
-            // Check if this memcmp matches any dynamic filter position
             for dynamic_cfg in &dynamic_filters_config {
                 if memcmp.offset == dynamic_cfg.offset {
-                    let bytes = match &memcmp.bytes {
-                        MemcmpEncodedBytes::Base58(s) => {
-                            bs58::decode(s).into_vec().unwrap_or_default()
-                        }
-                        MemcmpEncodedBytes::Base64(s) => {
-                            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
-                                .unwrap_or_default()
-                        }
-                        MemcmpEncodedBytes::Bytes(b) => b.clone(),
-                    };
+                    let bytes = memcmp.bytes_as_vec();
                     if bytes.len() == dynamic_cfg.length {
                         dynamic_filters.push((dynamic_cfg.offset, bytes));
                     }
@@ -250,12 +231,10 @@ async fn get_cached_response_with_filtering(
         return None;
     }
 
-    // Compute the cache key without the dynamic filters
-    let mut base_filters = Vec::new();
+    let mut base_filters = Vec::with_capacity(request_filters.len());
     for filter in request_filters {
         match filter {
             ProgramAccountFilter::Memcmp(memcmp) => {
-                // Skip memcmp filters that match dynamic positions
                 if !dynamic_filters_config
                     .iter()
                     .any(|d| d.offset == memcmp.offset)
@@ -268,52 +247,107 @@ async fn get_cached_response_with_filtering(
     }
 
     let base_key = compute_cache_key_with_filters(&params.0, &base_filters);
-    log::debug!(
-        "Looking for cache with base key: {} ({:x}) for program {}",
-        base_key,
-        base_key,
-        params.0
-    );
-    log::debug!(
-        "Available cache keys: {:?}",
-        GPA_MAP.iter().map(|e| e.key().clone()).collect::<Vec<_>>()
-    );
     let record = GPA_MAP.get(&base_key.to_string())?;
+    let bloom_key = {
+        let mut hasher = ahash::AHasher::default();
+        base_key.hash(&mut hasher);
+        for (offset, bytes) in &dynamic_filters {
+            offset.hash(&mut hasher);
+            bytes.hash(&mut hasher);
+        }
+        hasher.finish().to_string()
+    };
 
-    // Apply dynamic filtering to the cached entries
-    let filtered_entries: Vec<(Pubkey, Arc<HashableAccount>)> = record
-        .value()
-        .iter()
-        .filter_map(|x| {
-            let pair = x.pair();
-            let account = pair.1.clone();
+    let bloom_filter = BLOOM_CACHE
+        .get(&bloom_key)
+        .map(|entry| entry.value().clone());
+    let filtered_entries = tokio::task::spawn_blocking({
+        let dynamic_filters = dynamic_filters.clone();
+        let entries: Vec<_> = record
+            .value()
+            .iter()
+            .map(|x| {
+                let pair = x.pair();
+                (*pair.0, pair.1.clone())
+            })
+            .collect();
 
-            // Decode the account data
-            let account_data = base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                &account.data[0],
-            )
-            .ok()?;
+        move || {
+            use bloomfilter::Bloom;
 
-            // Check all dynamic filters
-            for (offset, expected_bytes) in &dynamic_filters {
-                if account_data.len() < offset + expected_bytes.len() {
-                    return None;
+            let has_cached_bloom = bloom_filter.is_some();
+            let bloom = bloom_filter.unwrap_or_else(|| {
+                let expected_items = entries.len().max(1000);
+                let false_positive_rate = 0.01;
+                Arc::new(Bloom::new_for_fp_rate(expected_items, false_positive_rate))
+            });
+
+            let mut results = Vec::with_capacity(entries.len() / 10);
+            let mut new_bloom = if !has_cached_bloom {
+                Some(Bloom::new_for_fp_rate(entries.len().max(1000), 0.01))
+            } else {
+                None
+            };
+
+            for (pubkey, account) in entries {
+                let mut filter_key = Vec::with_capacity(32 + dynamic_filters.len() * 16);
+                filter_key.extend_from_slice(pubkey.as_ref());
+                for (offset, bytes) in &dynamic_filters {
+                    filter_key.extend_from_slice(&offset.to_le_bytes());
+                    filter_key.extend_from_slice(bytes);
                 }
 
-                let actual_bytes = &account_data[*offset..*offset + expected_bytes.len()];
-                if actual_bytes != expected_bytes.as_slice() {
-                    return None;
+                if has_cached_bloom && !bloom.check(&filter_key) {
+                    continue;
+                }
+
+                let account_data = match base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &account.data[0],
+                ) {
+                    Ok(data) => data,
+                    Err(_) => continue,
+                };
+
+                let max_end = dynamic_filters
+                    .iter()
+                    .map(|(offset, bytes)| offset + bytes.len())
+                    .max()
+                    .unwrap_or(0);
+
+                if account_data.len() < max_end {
+                    continue;
+                }
+
+                let mut matches = true;
+                for (offset, expected_bytes) in &dynamic_filters {
+                    let actual_bytes = &account_data[*offset..*offset + expected_bytes.len()];
+                    if actual_bytes != expected_bytes.as_slice() {
+                        matches = false;
+                        break;
+                    }
+                }
+
+                if matches {
+                    results.push((pubkey, account));
+                    if let Some(ref mut new_bloom) = new_bloom {
+                        new_bloom.set(&filter_key);
+                    }
                 }
             }
 
-            Some((*pair.0, account))
-        })
-        .collect();
+            if let Some(new_bloom) = new_bloom {
+                BLOOM_CACHE.insert(bloom_key.clone(), Arc::new(new_bloom));
+            }
+
+            results
+        }
+    })
+    .await
+    .ok()?;
 
     drop(record);
 
-    // Always return a response, even if empty (to avoid fallback to upstream)
     Some(build_streamed_response(filtered_entries, request).await)
 }
 
@@ -352,11 +386,18 @@ async fn build_streamed_response(
 
 async fn serialize_entries_parallel(entries: Vec<(Pubkey, Arc<HashableAccount>)>) -> Vec<Bytes> {
     tokio::task::spawn_blocking(move || {
+        let chunk_size = entries
+            .len()
+            .saturating_div(rayon::current_num_threads())
+            .max(64);
+
         entries
             .into_par_iter()
             .enumerate()
+            .with_min_len(chunk_size)
             .map(|(i, (pubkey, account))| {
-                let mut buf = Vec::with_capacity(INITIAL_BUFFER_CAPACITY);
+                let estimated_size = account.space.min(4096) + 256;
+                let mut buf = Vec::with_capacity(estimated_size);
 
                 simd_json::to_writer(&mut buf, &GetProgramAccountsResult { account, pubkey })
                     .unwrap();

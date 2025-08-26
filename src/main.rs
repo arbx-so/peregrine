@@ -19,7 +19,7 @@ use std::{
     sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
-use structs::ProgramAccountMap;
+use structs::{BloomFilterCache, ProgramAccountMap};
 use tokio::sync::{OnceCell, RwLock, Semaphore};
 use tonic_health::pb::health_client::HealthClient;
 use yellowstone_grpc_client::{ClientTlsConfig, GeyserGrpcClient, InterceptorXToken};
@@ -49,6 +49,14 @@ const DEFAULT_LOG_FILTER: &str = "api=info,peregrine=info";
 
 /// Global cache for program accounts, indexed by program hash
 pub static GPA_MAP: LazyLock<Arc<ProgramAccountMap>> = LazyLock::new(|| {
+    Arc::new(DashMap::with_capacity_and_hasher(
+        DEFAULT_MAP_CAPACITY,
+        ahash::RandomState::new(),
+    ))
+});
+
+/// Global bloom filter cache for dynamic filters
+pub static BLOOM_CACHE: LazyLock<Arc<BloomFilterCache>> = LazyLock::new(|| {
     Arc::new(DashMap::with_capacity_and_hasher(
         DEFAULT_MAP_CAPACITY,
         ahash::RandomState::new(),

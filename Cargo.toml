@@ -31,6 +31,7 @@ async-stream                        = "0.3.6"
 axum                                = { version = "0.8.4", features = ["macros"] }
 backoff                             = { version = "0.4", features = ["tokio"] }
 base64                              = "0.22.1"
+bloomfilter                         = "1.0.14"
 clap                                = { version = "4.5", features = ["derive"] }
 dashmap                             = "6.1.0"
 env_logger                          = "0.11.8"
