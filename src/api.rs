@@ -140,7 +140,6 @@ async fn handle_get_program_accounts(
         log::info!("Cache hit for {} with dynamic filtering", params.0);
         Ok(cached)
     } else {
-        log::debug!("Dynamic filtering not applicable or no match found");
         let cache_key = compute_cache_key(&params);
         if let Some(cached) = get_cached_response(&cache_key, &request).await {
             log::info!("Cache hit for {} (hash: {})", params.0, cache_key);
@@ -167,19 +166,16 @@ fn parse_gpa_params(request: &RpcRequest) -> ApiResult<GetProgramAccountsParams>
 fn compute_cache_key_with_filters(program_id: &str, filters: &[ProgramAccountFilter]) -> u64 {
     let mut hasher = ahash::AHasher::default();
     program_id.hash(&mut hasher);
-
-    if !filters.is_empty() {
-        let combined_hash = filters
-            .iter()
-            .map(|filter| {
-                let mut filter_hasher = ahash::AHasher::default();
-                filter.normalized_hash(&mut filter_hasher);
-                filter_hasher.finish()
-            })
-            .fold(0u64, |acc, hash| acc ^ hash);
-
-        combined_hash.hash(&mut hasher);
+    
+    let mut combined_hash: u64 = 0;
+    for filter in filters {
+        if !matches!(filter, ProgramAccountFilter::Dynamic(_)) {
+            let mut filter_hasher = ahash::AHasher::default();
+            filter.normalized_hash(&mut filter_hasher);
+            combined_hash ^= filter_hasher.finish();
+        }
     }
+    combined_hash.hash(&mut hasher);
 
     hasher.finish()
 }
@@ -193,8 +189,6 @@ async fn get_cached_response_with_filtering(
     request: &RpcRequest,
 ) -> Option<Response<Body>> {
     let config = PROGRAM_CONFIG.get()?;
-
-    // Find the program configuration that matches this request
     let program_config = config.programs.iter().find(|p| p.program_id == params.0)?;
 
     let dynamic_filters_config: Vec<&DynamicFilter> = program_config
@@ -247,7 +241,14 @@ async fn get_cached_response_with_filtering(
     }
 
     let base_key = compute_cache_key_with_filters(&params.0, &base_filters);
+    
+    log::debug!("Base filters count: {}, filters: {:?}", base_filters.len(), base_filters);
+    log::debug!("Looking for base cache with key: {} for program {}", base_key, params.0);
+    log::debug!("Available cache keys: {:?}", GPA_MAP.iter().map(|e| e.key().clone()).collect::<Vec<_>>());
+    
     let record = GPA_MAP.get(&base_key.to_string())?;
+    
+    log::info!("Dynamic filter cache hit for {} (base_key: {})", params.0, base_key);
     let bloom_key = {
         let mut hasher = ahash::AHasher::default();
         base_key.hash(&mut hasher);

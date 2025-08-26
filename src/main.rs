@@ -415,7 +415,7 @@ async fn run_application(config: Arc<Config>) -> PeregrineResult<()> {
         info!("Yellowstone listener disabled (grpc.enabled = false)");
         None
     };
-    
+
     let api_handle = tokio::spawn(api::listen());
 
     if let Some(yellowstone_handle) = yellowstone_handle {
@@ -599,10 +599,9 @@ async fn yellowstone_listener(pool: Arc<ConnectionPool>) -> PeregrineResult<()> 
         );
     }
 
-    let account_filters_clone = account_filters.clone();
     let mut stream = pool
         .execute_grpc(move |client| {
-            let filters = account_filters_clone.clone();
+            let filters = account_filters.clone();
             Box::pin(async move {
                 let mut client_guard = client.lock().await;
                 let (_, stream) = client_guard
@@ -610,7 +609,12 @@ async fn yellowstone_listener(pool: Arc<ConnectionPool>) -> PeregrineResult<()> 
                         accounts: filters,
                         ..Default::default()
                     }))
-                    .await?;
+                    .await
+                    .map_err(|e| {
+                        PeregrineError::GrpcConnection(format!(
+                            "Failed to subscribe to account updates: {e}"
+                        ))
+                    })?;
                 Ok(stream)
             })
         })
@@ -624,8 +628,15 @@ async fn yellowstone_listener(pool: Arc<ConnectionPool>) -> PeregrineResult<()> 
             && let Some(id) = event.filters.first()
             && let Some(set) = GPA_MAP.get(id)
         {
-            let pubkey = acc.pubkey.clone().try_into().unwrap();
-            set.insert(pubkey, Arc::new(acc.into()));
+            let pubkey: Pubkey = acc.pubkey.clone().try_into().unwrap();
+
+            // If account data is empty (account closed), remove it from cache
+            if acc.data.is_empty() || acc.lamports == 0 {
+                set.remove(&pubkey);
+                log::debug!("Removed closed account {pubkey} from cache");
+            } else {
+                set.insert(pubkey, Arc::new(acc.into()));
+            }
         }
     }
     Ok(())

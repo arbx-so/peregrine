@@ -1,0 +1,48 @@
+[build]
+default-target = "x86_64-unknown-linux-gnu"
+
+[target.x86_64-unknown-linux-gnu]
+pre-build = [
+  """
+  apt-get update && apt-get install -y wget unzip libssl-dev pkg-config &&
+  wget https://github.com/protocolbuffers/protobuf/releases/download/v28.2/protoc-28.2-linux-x86_64.zip &&
+  unzip -o protoc-28.2-linux-x86_64.zip -d /usr/local &&
+  rm protoc-28.2-linux-x86_64.zip &&
+  protoc --version
+  """,
+]
+
+[target.x86_64-unknown-linux-gnu.env]
+passthrough = [
+  "RUSTFLAGS",
+  "CARGO_PROFILE_RELEASE_LTO",
+  "CARGO_PROFILE_RELEASE_CODEGEN_UNITS",
+  "CARGO_PROFILE_RELEASE_OPT_LEVEL",
+]
+
+[target.x86_64-unknown-linux-musl]
+pre-build = [
+  """
+    apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig wget unzip &&
+    wget https://github.com/protocolbuffers/protobuf/releases/download/v28.2/protoc-28.2-linux-x86_64.zip &&
+    unzip -o protoc-28.2-linux-x86_64.zip -d /usr/local &&
+    rm protoc-28.2-linux-x86_64.zip &&
+    protoc --version
+    """,
+]
+
+[target.x86_64-unknown-linux-musl.env]
+passthrough = [
+  "RUSTFLAGS",
+  "CARGO_PROFILE_RELEASE_LTO",
+  "CARGO_PROFILE_RELEASE_CODEGEN_UNITS",
+  "CARGO_PROFILE_RELEASE_OPT_LEVEL",
+]
+
+[build.env]
+passthrough = [
+  "RUSTFLAGS",
+  "CARGO_PROFILE_RELEASE_LTO",
+  "CARGO_PROFILE_RELEASE_CODEGEN_UNITS",
+  "CARGO_PROFILE_RELEASE_OPT_LEVEL",
+]

@@ -11,7 +11,6 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_with::{DisplayFromStr, serde_as};
-use solana_rpc_client_api::filter::MemcmpEncodedBytes;
 use solana_sdk::{account::Account, pubkey::Pubkey};
 use yellowstone_grpc_proto::geyser::SubscribeUpdateAccountInfo;
 
@@ -83,18 +82,6 @@ pub type ProgramAccountMap =
 
 /// Bloom filter cache for dynamic filter lookups
 pub type BloomFilterCache = DashMap<String, Arc<Bloom<Vec<u8>>>, ahash::RandomState>;
-
-/// Memory comparison filter for account data
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
-pub struct Memcmp {
-    /// Offset in the account data to start comparison
-    pub offset: usize,
-    /// Bytes to compare against
-    #[serde(flatten)]
-    pub bytes: MemcmpEncodedBytes,
-}
-
-
 
 /// Parameters for `GetProgramAccounts` RPC method
 #[derive(Deserialize, Debug)]
