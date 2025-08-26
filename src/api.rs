@@ -139,6 +139,12 @@ async fn handle_get_program_accounts(
     if let Some(cached) = get_cached_response_with_filtering(&params, &request).await {
         log::info!("Cache hit for {} with dynamic filtering", params.0);
         Ok(cached)
+    } else if let Some(cached) = check_no_filter_dynamic_only(&params, &request).await {
+        log::info!(
+            "Cache hit for {} (no filters, dynamic-only config)",
+            params.0
+        );
+        Ok(cached)
     } else {
         let cache_key = compute_cache_key(&params);
         if let Some(cached) = get_cached_response(&cache_key, &request).await {
@@ -166,7 +172,7 @@ fn parse_gpa_params(request: &RpcRequest) -> ApiResult<GetProgramAccountsParams>
 fn compute_cache_key_with_filters(program_id: &str, filters: &[ProgramAccountFilter]) -> u64 {
     let mut hasher = ahash::AHasher::default();
     program_id.hash(&mut hasher);
-    
+
     let mut combined_hash: u64 = 0;
     for filter in filters {
         if !matches!(filter, ProgramAccountFilter::Dynamic(_)) {
@@ -182,6 +188,55 @@ fn compute_cache_key_with_filters(program_id: &str, filters: &[ProgramAccountFil
 
 fn compute_cache_key(params: &GetProgramAccountsParams) -> u64 {
     compute_cache_key_with_filters(&params.0, params.1.filters.as_deref().unwrap_or(&[]))
+}
+
+async fn check_no_filter_dynamic_only(
+    params: &GetProgramAccountsParams,
+    request: &RpcRequest,
+) -> Option<Response<Body>> {
+    let request_has_filters = params
+        .1
+        .filters
+        .as_ref()
+        .map(|f| !f.is_empty())
+        .unwrap_or(false);
+
+    if request_has_filters {
+        return None;
+    }
+
+    let config = PROGRAM_CONFIG.get()?;
+    let program_config = config.programs.iter().find(|p| p.program_id == params.0)?;
+
+    let filters = program_config.filters.as_ref()?;
+    let has_only_dynamic = filters
+        .iter()
+        .all(|f| matches!(f, ProgramAccountFilter::Dynamic(_)));
+
+    if !has_only_dynamic || filters.is_empty() {
+        return None;
+    }
+
+    let base_key = compute_cache_key_with_filters(&params.0, &[]);
+    let record = GPA_MAP.get(&base_key.to_string())?;
+
+    let entries: Vec<(Pubkey, Arc<HashableAccount>)> = record
+        .value()
+        .iter()
+        .map(|x| {
+            let pair = x.pair();
+            (*pair.0, pair.1.clone())
+        })
+        .collect();
+    drop(record);
+
+    log::info!(
+        "Returning {} cached accounts for {} (no filters, dynamic-only config)",
+        entries.len(),
+        params.0
+    );
+
+    Some(build_streamed_response(entries, request).await)
 }
 
 async fn get_cached_response_with_filtering(
@@ -241,14 +296,29 @@ async fn get_cached_response_with_filtering(
     }
 
     let base_key = compute_cache_key_with_filters(&params.0, &base_filters);
-    
-    log::debug!("Base filters count: {}, filters: {:?}", base_filters.len(), base_filters);
-    log::debug!("Looking for base cache with key: {} for program {}", base_key, params.0);
-    log::debug!("Available cache keys: {:?}", GPA_MAP.iter().map(|e| e.key().clone()).collect::<Vec<_>>());
-    
+
+    log::debug!(
+        "Base filters count: {}, filters: {:?}",
+        base_filters.len(),
+        base_filters
+    );
+    log::debug!(
+        "Looking for base cache with key: {} for program {}",
+        base_key,
+        params.0
+    );
+    log::debug!(
+        "Available cache keys: {:?}",
+        GPA_MAP.iter().map(|e| e.key().clone()).collect::<Vec<_>>()
+    );
+
     let record = GPA_MAP.get(&base_key.to_string())?;
-    
-    log::info!("Dynamic filter cache hit for {} (base_key: {})", params.0, base_key);
+
+    log::info!(
+        "Dynamic filter cache hit for {} (base_key: {})",
+        params.0,
+        base_key
+    );
     let bloom_key = {
         let mut hasher = ahash::AHasher::default();
         base_key.hash(&mut hasher);
