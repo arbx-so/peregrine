@@ -52,6 +52,7 @@ solana-client                       = "2"
 solana-rpc-client                   = "2"
 solana-rpc-client-api               = "2"
 solana-sdk                          = "2"
+solana-system-interface             = "2"
 thiserror                           = "2"
 tokio                               = { version = "1.47.1", features = ["rt-multi-thread", "full"] }
 tonic-health                        = "0.14.1"

@@ -12,6 +12,7 @@ use solana_client::{
 };
 use solana_rpc_client::http_sender::HttpSender;
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey};
+use solana_system_interface::program as system_program;
 use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
@@ -26,8 +27,10 @@ use yellowstone_grpc_client::{ClientTlsConfig, GeyserGrpcClient, InterceptorXTok
 use yellowstone_grpc_proto::{
     geyser::{
         SubscribeRequest, SubscribeRequestFilterAccounts, SubscribeRequestFilterAccountsFilter,
-        SubscribeRequestFilterAccountsFilterMemcmp, SubscribeUpdateAccount,
-        geyser_client::GeyserClient, subscribe_request_filter_accounts_filter::Filter,
+        SubscribeRequestFilterAccountsFilterLamports, SubscribeRequestFilterAccountsFilterMemcmp,
+        SubscribeUpdateAccount, geyser_client::GeyserClient,
+        subscribe_request_filter_accounts_filter::Filter,
+        subscribe_request_filter_accounts_filter_lamports::Cmp,
         subscribe_request_filter_accounts_filter_memcmp::Data, subscribe_update::UpdateOneof,
     },
     tonic::{self, codec::CompressionEncoding},
@@ -46,6 +49,7 @@ use error::{PeregrineError, PeregrineResult};
 
 const DEFAULT_MAP_CAPACITY: usize = 1024;
 const DEFAULT_LOG_FILTER: &str = "api=info,peregrine=info";
+const CLOSED_ACCOUNTS_KEY: &str = "closed_accounts";
 
 /// Global cache for program accounts, indexed by program hash
 pub static GPA_MAP: LazyLock<Arc<ProgramAccountMap>> = LazyLock::new(|| {
@@ -599,6 +603,26 @@ async fn yellowstone_listener(pool: Arc<ConnectionPool>) -> PeregrineResult<()> 
         );
     }
 
+    account_filters.insert(
+        CLOSED_ACCOUNTS_KEY.to_string(),
+        SubscribeRequestFilterAccounts {
+            owner: vec![system_program::ID.to_string()],
+            filters: vec![
+                SubscribeRequestFilterAccountsFilter {
+                    filter: Some(Filter::Lamports(
+                        SubscribeRequestFilterAccountsFilterLamports {
+                            cmp: Some(Cmp::Eq(0)),
+                        },
+                    )),
+                },
+                SubscribeRequestFilterAccountsFilter {
+                    filter: Some(Filter::Datasize(0)),
+                },
+            ],
+            ..Default::default()
+        },
+    );
+
     let mut stream = pool
         .execute_grpc(move |client| {
             let filters = account_filters.clone();
@@ -625,17 +649,23 @@ async fn yellowstone_listener(pool: Arc<ConnectionPool>) -> PeregrineResult<()> 
         if let Some(UpdateOneof::Account(SubscribeUpdateAccount {
             account: Some(acc), ..
         })) = event.update_oneof
-            && let Some(id) = event.filters.first()
-            && let Some(set) = GPA_MAP.get(id)
         {
             let pubkey: Pubkey = acc.pubkey.clone().try_into().unwrap();
 
-            // If account data is empty (account closed), remove it from cache
-            if acc.data.is_empty() || acc.lamports == 0 {
-                set.remove(&pubkey);
-                log::debug!("Removed closed account {pubkey} from cache");
-            } else {
-                set.insert(pubkey, Arc::new(acc.into()));
+            if let Some(id) = event.filters.first()
+                && id == CLOSED_ACCOUNTS_KEY
+            {
+                let mut removed_any = false;
+                for entry in GPA_MAP.iter() {
+                    if entry.value().remove(&pubkey).is_some() {
+                        removed_any = true;
+                    }
+                }
+                if removed_any {
+                    log::debug!(
+                        "Evicted closed account {pubkey} from caches via System Program stream"
+                    );
+                }
             }
         }
     }
